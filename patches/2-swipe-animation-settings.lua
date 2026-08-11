@@ -707,7 +707,27 @@ partial and this toggle has no further effect.]]),
         return items
     end
 
-    local function buildSettingsMenu()
+    -- On/off toggle for the page-turn animation.
+    -- On touch devices the core "Page turn animations" toggle lives inside the
+    -- (touch-only) Page turns menu; on non-touch devices (Kindle 4) that menu
+    -- is never registered by KOReader, so we surface our own toggle here to
+    -- keep the feature both discoverable and toggleable.
+    local function buildSwipeAnimationToggle()
+        return {
+            text = _("Page turn animations"),
+            checked_func = function()
+                return G_reader_settings:isTrue("swipe_animations")
+            end,
+            callback = function()
+                G_reader_settings:flipNilOrFalse("swipe_animations")
+            end,
+            separator = true,
+        }
+    end
+
+    -- Tuning-only submenu (touch devices): injected under the core Page turns
+    -- menu, which already provides its own on/off toggle.
+    local function buildSwipeAnimationSettingsSubMenu()
         return {
             text = _("Swipe animation settings"),
             enabled_func = function()
@@ -724,44 +744,89 @@ of each strip update during the animation. On non-touch devices (e.g. Kindle
         }
     end
 
-    -- Inject the settings item into the "Page turn animations" submenu.
-    -- We deliberately target page_turns (not taps_and_gestures) so the
-    -- settings are reachable on NON-TOUCH devices such as the Kindle 4,
-    -- where taps_and_gestures may be hidden. page_turns is shown whenever
-    -- Device:canDoSwipeAnimation() is true — which we force above.
+    -- Standalone top-level item (non-touch devices, where Page turns does not
+    -- exist): bundles the on/off toggle with all tuning so the feature is
+    -- fully reachable from the Settings menu without the (absent) Page turns menu.
+    local function buildSwipeAnimationStandaloneMenu()
+        local items = buildSwipeAnimationSubItems()
+        table.insert(items, 1, buildSwipeAnimationToggle())
+        return {
+            text = _("Swipe animation settings"),
+            help_text = _([[
+Enable, disable, and tune the software page-turn wipe animation.
+
+On this device (no touch screen) the stock "Page turns" menu is not shown, so
+this entry provides the toggle and all settings directly. The entity page-turn
+keys drive the animation direction automatically.
+
+The refresh mode and engine directly affect the quality, ghosting, and speed
+of each strip update during the animation.]]),
+            sub_item_table = items,
+        }
+    end
+
+    -- Inject the settings. KOReader builds the reader menu from a fixed `order`
+    -- table (ui/elements/reader_menu_order): MenuSorter:sort() only walks that
+    -- table, so a top-level menu_items key NOT listed there is dropped / orphaned.
+    -- We therefore (1) register our key in order["setting"] so it shows up as a
+    -- regular top-level item under the Settings tab, and (2) inject a top-level
+    -- "Swipe animation settings" entry that bundles the on/off toggle with all
+    -- tuning. On non-touch devices (Kindle 4) KOReader never registers the
+    -- "Page turns" menu at all, so this entry is the ONLY way to reach the
+    -- toggle + tuning. We force Device:canDoSwipeAnimation() above so the
+    -- capability is always claimed.
     local function injectSettingsMenu(menu_items)
         if type(menu_items) ~= "table" then
             return false
         end
 
-        local pt = menu_items["page_turns"]
-        if type(pt) ~= "table" then
-            -- Fallback: top-level entry (rare on stock KOReader).
-            local existing = menu_items["swipe_animation_settings"]
-            if type(existing) == "table" and existing._swipe_animation_settings_patch_item then
-                existing.sub_item_table = buildSwipeAnimationSubItems()
-                return true
+        -- CRITICAL (Kindle 4 / non-touch): register our top-level key in
+        -- KOReader's reader menu *order* table. MenuSorter:sort() only walks
+        -- `order` to build the menu, so a top-level menu_items key that is not
+        -- listed there is treated as an orphan: it is either dropped entirely
+        -- or dumped under the first tab with a "NEW: " prefix. By inserting the
+        -- key into order["setting"] it appears as a regular top-level item under
+        -- the Settings tab. The order table is require()-cached, so mutating the
+        -- cached instance is seen by ReaderMenu:setUpdateItemTable() before it
+        -- calls MenuSorter:mergeAndSort().
+        local ok, order = pcall(require, "ui/elements/reader_menu_order")
+        if ok and type(order) == "table" and type(order.setting) == "table" then
+            local registered = false
+            for _, id in ipairs(order.setting) do
+                if id == "swipe_animation_settings" then
+                    registered = true
+                    break
+                end
             end
-            local item = buildSettingsMenu()
-            item._swipe_animation_settings_patch_item = true
-            menu_items["swipe_animation_settings"] = item
+            if not registered then
+                table.insert(order.setting, "swipe_animation_settings")
+            end
+        end
+
+        -- Inject (or refresh) our standalone top-level "Swipe animation settings"
+        -- entry. On non-touch devices (Kindle 4) the stock "Page turns" menu does
+        -- not exist, so this entry is the *only* way to reach the toggle + tuning.
+        local existing = menu_items["swipe_animation_settings"]
+        if type(existing) == "table" and existing._swipe_animation_settings_patch_item then
+            local items = buildSwipeAnimationSubItems()
+            table.insert(items, 1, buildSwipeAnimationToggle())
+            existing.sub_item_table = items
             return true
         end
 
-        if type(pt.sub_item_table) ~= "table" then
-            pt.sub_item_table = {}
-        end
-
-        for _, it in ipairs(pt.sub_item_table) do
-            if it._swipe_animation_settings_patch_item then
-                it.sub_item_table = buildSwipeAnimationSubItems()
-                return true
-            end
-        end
-
-        local item = buildSettingsMenu()
+        local item = buildSwipeAnimationStandaloneMenu()
         item._swipe_animation_settings_patch_item = true
-        table.insert(pt.sub_item_table, item)
+        menu_items["swipe_animation_settings"] = item
+
+        -- NOTE: we inject a single top-level entry (registered in
+        -- order["setting"]) that bundles the toggle + all tuning, rather than
+        -- also appending into the native "Page turns" menu. This avoids a timing
+        -- problem (page_turns is created *inside* orig_setUpdateItemTable, i.e.
+        -- after this hook runs) and keeps one discoverable entry point on every
+        -- device. The stock "Page turn animations" toggle (touch-only) still
+        -- lives in Page turns and remains functional.
+
+        require("logger").info("[SwipeAnimation] settings item registered under Settings tab")
         return true
     end
 
